@@ -14,8 +14,9 @@ training and the validation set when the run logged them (train_b1_val.py).
     inch Run B1 (trained without a validation set), as before:
     python scripts/check_fit.py --ckpt results_aug20_anchors_redraw/mgn_best.pt --draws 8
 
-Run eval_own_unseen.py with the same --draws first: this script reads its
-metrics_all.csv for the three test sets.
+Run eval_unseen_v2.py (or the older eval_own_unseen.py) with the same --draws first:
+this script reads its metrics_all.csv for the three test sets. Works for Run B1 and
+Run B2 (Kt target) - the model kind is read from the checkpoint. Figures in Arial, 300 dpi.
 
 WHAT IT DOES
     1. Loss curve (loss_log.csv): has training stopped improving?
@@ -84,7 +85,9 @@ STILL_RISING = 0.002        # validation R2 gained more than this over the last 
 BLUE, ORANGE = "#2a78d6", "#eb6834"
 INK, INK2, MUTED, GRID = "#0b0b0b", "#52514e", "#898781", "#e1e0d9"
 LEVEL_COLOUR = dict(train=BLUE, validation=ORANGE, unseen_loads=MUTED, unseen_interp=MUTED, unseen_extrap=MUTED)
-plt.rcParams.update({"font.family": "DejaVu Sans", "text.color": INK, "axes.edgecolor": "#c3c2b7",
+import plot_style                                             # noqa: E402
+plot_style.use_arial()
+plt.rcParams.update({"text.color": INK, "axes.edgecolor": "#c3c2b7",
                      "axes.labelcolor": INK2, "xtick.color": INK2, "ytick.color": INK2,
                      "axes.titlesize": 11, "axes.titlecolor": INK, "axes.titlelocation": "left",
                      "legend.frameon": False})
@@ -244,7 +247,7 @@ def plot_r2_vs_epoch(c, lr, path, title):
 
     fig.suptitle(title, fontsize=12, x=0.01, ha="left")
     fig.tight_layout()
-    fig.savefig(path, dpi=130)
+    fig.savefig(path, dpi=plot_style.DPI, facecolor="white")
     plt.close(fig)
     print("  wrote %s" % path)
 
@@ -309,7 +312,7 @@ def fit_cases(E, mgn, items, draws, Case, build_topology, augment_edges, geometr
             truth, geom, load = it["truth"], it["name"], it["load"]
         else:
             truth, geom, load = np.asarray(it.von_mises, dtype=np.float64), it.geometry, float(it.metadata["load"])
-        m = E.metrics(truth, pred)
+        m = E.metrics(truth, pred, load)
         rows.append(dict(geometry=geom, load=load, r2=m["r2"], rmse=m["rmse"],
                          peak_true=m["peak_true"], peak_pred=m["peak_pred"], peak_err_pct=m["peak_err_pct"]))
         if (i + 1) % 60 == 0 or i + 1 == len(items):
@@ -342,7 +345,9 @@ def main():
     folder = os.path.dirname(a.ckpt) or "."
     out = os.path.join(folder, "fit_check")
     os.makedirs(out, exist_ok=True)
-    test_dir = a.test_dir or os.path.join(folder, "unseen_eval" + ("_draws%d" % a.draws if a.draws > 1 else ""))
+    sfx = "_draws%d" % a.draws if a.draws > 1 else ""
+    cands = [os.path.join(folder, "unseen_eval_v2" + sfx), os.path.join(folder, "unseen_eval" + sfx)]
+    test_dir = a.test_dir or next((d for d in cands if os.path.isfile(os.path.join(d, "metrics_all.csv"))), cands[0])
 
     # ---- 1. loss curve and 2. R2 vs epoch --------------------------------
     lr = loss_report(os.path.join(folder, "loss_log.csv"))
@@ -363,7 +368,7 @@ def main():
 
     # ---- 3. fits of this checkpoint ------------------------------------------
     import torch                                                  # noqa: E402  (only needed from here)
-    import eval_own_unseen as E                                   # noqa: E402
+    import eval_unseen_v2 as E                                    # noqa: E402  (B1 and B2 models)
     from mgn.dataset import Case, build_topology, load_dataset    # noqa: E402
     from mgn.graph import augment_edges, geometry_seed            # noqa: E402
 
@@ -388,7 +393,7 @@ def main():
     # ---- 4. the fit ladder ------------------------------------------------
     tests = read_test_csv(os.path.join(test_dir, "metrics_all.csv"))
     if not tests:
-        print("\nNo %s - run eval_own_unseen.py with --draws %d first for the test levels."
+        print("\nNo %s - run eval_unseen_v2.py with --draws %d first for the test levels."
               % (os.path.join(test_dir, "metrics_all.csv"), a.draws))
     for k in ("unseen_loads", "unseen_interp", "unseen_extrap"):
         if tests.get(k):
@@ -455,7 +460,7 @@ def main():
     ax.set_xlabel("epoch")
     ax.set_ylabel("loss (MSE of z-scored stress)")
     ax.legend(fontsize=9)
-    ax.set_title("(a) loss: still falling = under-trained")
+    ax.set_title("(a) training loss  (falling alone is not under-training - compare the validation R\u00b2 in (b))")
     style(ax)
 
     ax = axs[0, 1]
@@ -501,7 +506,7 @@ def main():
             ax.set_ylim(bottom=0)
     fig.suptitle("Fit check  -  %s" % a.ckpt, fontsize=12, x=0.01, ha="left")
     fig.tight_layout()
-    fig.savefig(os.path.join(out, "fit_check.png"), dpi=130)
+    fig.savefig(os.path.join(out, "fit_check.png"), dpi=plot_style.DPI, facecolor="white")
     plt.close(fig)
     print("\nwrote %s" % out)
     return 0

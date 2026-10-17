@@ -53,13 +53,15 @@ Optional second ablation - the network cannot see the load at all:
 
 - `metrics_all.csv` - R2, RMSE, MAE, max error, peak truth / prediction, peak error %, **NRMSE %**
 - `summary_unseen_loads.png`, `summary_r2_vs_load.png`, `summary_unseen_geometries_heatmap.png`
-- `contours/<set>/<geometry>__<load>_plate.png` - whole plate, FE / MGN / error stacked
-- `contours/<set>/<geometry>__<load>_zoom.png` - zoom on the hole, FE / MGN / error side by side
+- `contours/<set>/<geometry>__<load>.png` - the B1 layout: FE / MGN / error in rows, whole plate + zoom column,
+  ~20 colour bands with round-number edges (as in the B1 plots)
+- `contours/<set>/<geometry>__<load>_zoom.png` - a closer zoom on the hole, FE / MGN / error side by side
 - `scatter/<set>/<geometry>__<load>.png` - **separate** parity plot per file
 - `scatter_grid_<group>_<load>.png` - **together**: one panel per geometry
 - `scatter_overlay_<group>_<load>.png` - **together**: all geometries on one axes, coloured by family
 
-All PNGs are 300 dpi. Options: `--dpi 600`, `--formats png,pdf` (vector PDF, fonts embedded),
+All PNGs are 300 dpi. Options: `--bands 30`, `--lines` (iso-lines on the band edges), `--smooth` (100 levels),
+`--dpi 600`, `--formats png,pdf` (vector PDF, fonts embedded),
 `--contour-loads all`, `--contour-sets interp,extrap`, `--scatter-loads 60`, `--overlay-log`.
 For these, run `python scripts/eval_unseen_v2.py --ckpt results_si_cps4_b2/mgn_best_val.pt --draws 8 <options>`.
 

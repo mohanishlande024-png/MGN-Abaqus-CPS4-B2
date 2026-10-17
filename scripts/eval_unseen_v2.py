@@ -10,6 +10,7 @@ the kind of model is read from the checkpoint.
     python scripts/eval_unseen_v2.py --ckpt results_si_cps4_b1/mgn_best_val.pt --draws 8
     options:
       --dpi 600                       sharper PNGs (default 300)
+      --bands 30 / --lines / --smooth contour style (default: 20 colour bands, as in B1)
       --formats png,pdf               also vector PDFs (fonts embedded, contours rasterised at --dpi)
       --contour-loads all             contours at every load, not only 8 / 60 / 130
       --contour-sets interp,extrap    contours only for the unseen geometries (skip the 81 unseen-load files)
@@ -31,10 +32,12 @@ WRITES  (into <checkpoint folder>/unseen_eval_v2[_drawsK]/)
     metrics_all.csv            every file: R2, RMSE, MAE, max error, peak truth / prediction,
                                peak error %, NRMSE % (new, last column)
     summary_unseen_loads.png, summary_r2_vs_load.png, summary_unseen_geometries_heatmap.png
-    contours/<set>/<geometry>__<load>_plate.png   whole plate: FE | MGN | error, stacked
-    contours/<set>/<geometry>__<load>_zoom.png    zoom on the hole: FE | MGN | error, side by side
-        FE and MGN share one colour scale; 100 colour levels; peak marked with a circle;
-        hole and plate outline drawn from the mesh.
+    contours/<set>/<geometry>__<load>.png         the B1 layout: FE / MGN / error in rows,
+                                                  whole plate + zoom column + colour bar
+    contours/<set>/<geometry>__<load>_zoom.png    a closer zoom on the hole: FE | MGN | error side by side
+        Colour BANDS with round-number edges (~20 bands, as in the B1 plots); FE and MGN share
+        one colour scale; peak marked with a circle; hole and plate outline drawn from the mesh.
+        --bands 30 more bands, --lines thin iso-lines on the band edges, --smooth 100 levels.
     scatter/<set>/<geometry>__<load>.png          SEPARATE: one parity plot per file
     scatter_grid_<group>_<load>.png               TOGETHER: one panel per geometry
     scatter_overlay_<group>_<load>.png            TOGETHER: every geometry on one axes,
@@ -271,8 +274,8 @@ def outline(tris):
 
 
 def nice_levels(lo, hi, n=100, symmetric=False):
-    """n colour levels spanning exactly the data (a hair wider, so the extreme nodes are filled),
-    and round-number colour-bar ticks that lie inside that range."""
+    """SMOOTH style: n colour levels spanning exactly the data (a hair wider, so the extreme
+    nodes are filled), and round-number colour-bar ticks that lie inside that range."""
     if symmetric:
         m = max(abs(lo), abs(hi), 1e-9)
         lo, hi = -m, m
@@ -284,24 +287,52 @@ def nice_levels(lo, hi, n=100, symmetric=False):
     return np.linspace(lo - pad, hi + pad, n + 1), ticks
 
 
+def band_levels(lo, hi, nbands=20, symmetric=False):
+    """BANDED style (as in the B1 plots): about nbands colour bands with round-number edges,
+    e.g. 0, 20, 40 ... MPa, so every band is a clearly separate colour."""
+    if symmetric:
+        m = max(abs(lo), abs(hi), 1e-9)
+        lo, hi = -m, m
+    if hi - lo < 1e-12:
+        hi = lo + 1e-6
+    return MaxNLocator(nbins=nbands, symmetric=symmetric).tick_values(lo, hi), None
+
+
 # ----------------------------------------------------------------- contour plots
 
-def _panel(ax, tri, vals, levels, cmap, segs, peak_xy=None, ms=8):
+def _panel(ax, tri, vals, levels, cmap, segs, peak_xy=None, ms=8, lines=False):
     cs = ax.tricontourf(tri, vals, levels=levels, cmap=cmap, zorder=0)
-    ax.set_rasterization_zorder(0.5)           # PDF: the colour fill is an image, outline and text stay vector
+    ax.set_rasterization_zorder(0.5)           # PDF: the colour fill is an image, lines and text stay vector
+    if lines:                                   # thin iso-lines on every band edge
+        ax.tricontour(tri, vals, levels=levels, colors=INK, linewidths=0.25, alpha=0.45, zorder=1)
     ax.add_collection(LineCollection(segs, colors=INK2, linewidths=0.6, zorder=2))
     if peak_xy is not None:
-        ax.plot(peak_xy[0], peak_xy[1], "o", mfc="none", mec="#ff2d55", ms=ms, mew=1.6, zorder=5)
+        ax.plot(peak_xy[0], peak_xy[1], "o", mfc="none", mec="#ff2d55", ms=ms, mew=1.8, zorder=5)
     ax.set_aspect("equal")
     ax.set_xticks([])
     ax.set_yticks([])
-    for s in ax.spines.values():
-        s.set_visible(False)
+    for sp in ax.spines.values():
+        sp.set_visible(False)
     return cs
 
 
-def contour_figures(item, res, info, set_key, units, stem, formats, dpi):
-    """Two figures per file: <stem>_plate (whole plate) and <stem>_zoom (around the hole)."""
+def _colorbar(fig, cs, cax, ticks, units, **kw):
+    cb = fig.colorbar(cs, cax=cax, ticks=ticks, **kw)
+    cb.ax.tick_params(labelsize=8.5)
+    cb.set_label(units, fontsize=9)
+    if cb.solids is not None:
+        cb.solids.set_rasterized(True)
+    return cb
+
+
+def contour_figures(item, res, info, set_key, units, stem, formats, dpi, style=None):
+    """Two figures per file, both in the colour style chosen by `style`:
+         <stem>.png       the B1 layout - FE / MGN / error in rows, whole plate + zoom column
+         <stem>_zoom.png  a closer square zoom on the hole, FE | MGN | error side by side
+       style = dict(bands=20, smooth=False, lines=False)
+         banded (default, as in B1): ~`bands` colour bands with round-number edges
+         smooth: 100 levels (continuous look)        lines: thin iso-lines on the band edges"""
+    style = dict(dict(bands=20, smooth=False, lines=False), **(style or {}))
     c, tris = item["coords"].astype(float), item["tris"]
     t, p, m = item["truth"], res["pred"], res["m"]
     err = p - t
@@ -312,64 +343,68 @@ def contour_figures(item, res, info, set_key, units, stem, formats, dpi):
     y0, y1 = float(c[:, 1].min()), float(c[:, 1].max())
     H = y1 - y0
 
-    lv, lt = nice_levels(min(float(t.min()), float(p.min()), 0.0), max(float(t.max()), float(p.max())))
+    lo, hi = min(float(t.min()), float(p.min()), 0.0), max(float(t.max()), float(p.max()))
     el = max(float(np.abs(err).max()), 1e-9)
-    elv, elt = nice_levels(-el, el, symmetric=True)
+    if style["smooth"]:
+        lv, lt = nice_levels(lo, hi)
+        elv, elt = nice_levels(-el, el, symmetric=True)
+    else:
+        lv, lt = band_levels(lo, hi, style["bands"])               # FE and MGN share these levels
+        elv, elt = band_levels(-el, el, style["bands"], symmetric=True)
     rows = [(t, lv, lt, "viridis", "Abaqus FE (truth)", "peak %s %s" % (fmt(m["peak_true"]), units),
              c[m["i_peak_true"]]),
             (p, lv, lt, "viridis", "MGN prediction", "peak %s %s  (%+.1f %%)" % (fmt(m["peak_pred"]), units,
                                                                                  m["peak_err_pct"]),
              c[m["i_peak_pred"]]),
-            (err, elv, elt, "RdBu_r", "Error = MGN − FE", "max |error| %s %s" % (fmt(m["max_abs_err"]), units),
-             None)]
-    head = "%s   |   %s   |   load %g %s" % (label(item["name"], info), SET_TITLE[set_key], item["load"], units)
-    nums = ("R² = %.4f     RMSE = %s %s  (%.2f %% of load)     MAE = %s %s     %d nodes"
+            (err, elv, elt, "RdBu_r", "Error = MGN − FE", "RMSE %s %s,  max |error| %s %s"
+             % (fmt(m["rmse"]), units, fmt(m["max_abs_err"]), units), None)]
+    head = "%s   -   %s   -   load %g %s" % (label(item["name"], info), SET_TITLE[set_key], item["load"], units)
+    nums = ("R² = %.4f     RMSE %s %s  (%.2f %% of load)     MAE %s %s     %d nodes"
             % (m["r2"], fmt(m["rmse"]), units, m["nrmse_load_pct"], fmt(m["mae"]), units, len(t)))
 
-    # ---- whole plate: three rows
-    W = 13.0
-    ph = W * 0.86 * H / max(x1 - x0, 1e-9)               # panel height that keeps the plate's aspect
-    fig = plt.figure(figsize=(W, 3 * (ph + 0.55) + 0.9))
-    gs = fig.add_gridspec(3, 2, width_ratios=[1, 0.018], wspace=0.02, hspace=0.32,
-                          left=0.02, right=0.93, top=1 - 0.85 / fig.get_figheight(), bottom=0.02)
-    for r, (vals, levels, ticks, cmap, title, sub, pk) in enumerate(rows):
-        ax = fig.add_subplot(gs[r, 0])
-        cs = _panel(ax, tri, vals, levels, cmap, segs, pk, ms=7)
-        ax.set_xlim(x0 - 0.005 * (x1 - x0), x1 + 0.005 * (x1 - x0))
-        ax.set_ylim(y0 - 0.02 * H, y1 + 0.02 * H)
-        ax.set_title("%s    %s" % (title, sub), loc="left", fontsize=11)
-        cb = fig.colorbar(cs, cax=fig.add_subplot(gs[r, 1]), ticks=ticks)
-        cb.ax.tick_params(labelsize=8.5)
-        cb.set_label(units, fontsize=9)
-        if cb.solids is not None:
-            cb.solids.set_rasterized(True)
-    fig.suptitle(head + "\n" + nums, fontsize=11.5, y=1 - 0.12 / fig.get_figheight(), va="top")
-    plot_style.save(fig, stem + "_plate.png", formats, dpi)
-    plt.close(fig)
-
-    # ---- zoom on the hole: three square panels side by side
-    hole = c[item.get("node_types", np.zeros(len(c))) == HOLE_ID] if "node_types" in item else c[:0]
+    # hole centre and size (hole nodes come from the graph's node types)
+    nt = item.get("node_types")
+    hole = c[np.asarray(nt) == HOLE_ID] if nt is not None else c[:0]
     if len(hole):
         cx, cy = float(hole[:, 0].mean()), float(hole[:, 1].mean())
-        half = float(max(np.abs(hole[:, 0] - cx).max(), np.abs(hole[:, 1] - cy).max()))
+        hx = float(np.abs(hole[:, 0] - cx).max())
+        half = float(max(hx, np.abs(hole[:, 1] - cy).max()))
     else:
-        cx, cy, half = 0.5 * (x0 + x1), 0.5 * (y0 + y1), 0.1 * H
-    w = min(max(1.9 * half, 0.12 * H), 0.5 * H)
-    fig = plt.figure(figsize=(15.0, 5.6))
+        cx, cy, hx, half = 0.5 * (x0 + x1), 0.5 * (y0 + y1), 0.1 * H, 0.1 * H
+
+    # ---- 1. the B1 layout: rows FE / MGN / error, columns whole plate | zoom | colour bar
+    w = max(0.6 * H, 1.5 * hx)
+    fig = plt.figure(figsize=(15.5, 7.4), facecolor="white")
+    gs = fig.add_gridspec(3, 3, width_ratios=[6.0, 1.45, 0.07], wspace=0.06, hspace=0.42,
+                          left=0.03, right=0.94, top=0.855, bottom=0.03)
+    for r, (vals, levels, ticks, cmap, title, sub, pk) in enumerate(rows):
+        for col, (xa, xb) in enumerate(((x0, x1), (cx - w, cx + w))):
+            ax = fig.add_subplot(gs[r, col])
+            cs = _panel(ax, tri, vals, levels, cmap, segs, pk, ms=11 if col else 8, lines=style["lines"])
+            ax.set_xlim(xa, xb)
+            ax.set_ylim(y0 - 0.02 * H, y1 + 0.02 * H)
+            if col == 0:
+                ax.set_title("%s    %s" % (title, sub), loc="left", fontsize=11.5)
+            else:
+                ax.set_title("zoom on the hole", fontsize=9.5, color=MUTED)
+        _colorbar(fig, cs, fig.add_subplot(gs[r, 2]), ticks, units)
+    fig.suptitle(head + "\n" + nums, fontsize=13, y=0.975)
+    plot_style.save(fig, stem + ".png", formats, dpi)
+    plt.close(fig)
+
+    # ---- 2. closer zoom: three square panels side by side, same colours
+    wz = min(max(1.9 * half, 0.12 * H), 0.5 * H)
+    fig = plt.figure(figsize=(15.0, 5.6), facecolor="white")
     gs = fig.add_gridspec(2, 3, height_ratios=[1, 0.045], wspace=0.12, hspace=0.12,
                           left=0.02, right=0.98, top=0.83, bottom=0.08)
     for k, (vals, levels, ticks, cmap, title, sub, pk) in enumerate(rows):
         ax = fig.add_subplot(gs[0, k])
-        cs = _panel(ax, tri, vals, levels, cmap, segs, pk, ms=11)
-        ax.set_xlim(cx - w, cx + w)
-        ax.set_ylim(max(cy - w, y0 - 0.01 * H), min(cy + w, y1 + 0.01 * H))
+        cs = _panel(ax, tri, vals, levels, cmap, segs, pk, ms=11, lines=style["lines"])
+        ax.set_xlim(cx - wz, cx + wz)
+        ax.set_ylim(max(cy - wz, y0 - 0.01 * H), min(cy + wz, y1 + 0.01 * H))
         ax.set_title("%s\n%s" % (title, sub), fontsize=11)
-        cb = fig.colorbar(cs, cax=fig.add_subplot(gs[1, k]), orientation="horizontal", ticks=ticks)
-        cb.ax.tick_params(labelsize=8.5)
-        cb.set_label(units, fontsize=9)
-        if cb.solids is not None:
-            cb.solids.set_rasterized(True)
-    fig.suptitle(head + "   |   zoom on the hole\n" + nums, fontsize=11.5, y=0.985, va="top")
+        _colorbar(fig, cs, fig.add_subplot(gs[1, k]), ticks, units, orientation="horizontal")
+    fig.suptitle(head + "   -   zoom on the hole\n" + nums, fontsize=11.5, y=0.985, va="top")
     plot_style.save(fig, stem + "_zoom.png", formats, dpi)
     plt.close(fig)
 
@@ -652,6 +687,10 @@ def main():
     ap.add_argument("--contour-sets", default="loads,interp,extrap",
                     help="which sets get contour plots, e.g. interp,extrap")
     ap.add_argument("--no-contours", action="store_true")
+    ap.add_argument("--bands", type=int, default=20,
+                    help="number of colour bands in the contour plots (default 20, as in B1)")
+    ap.add_argument("--smooth", action="store_true", help="smooth contours (100 levels) instead of bands")
+    ap.add_argument("--lines", action="store_true", help="thin iso-lines on every band edge")
     ap.add_argument("--scatter-loads", nargs="+", default=["test"],
                     help="'test' (default), 'all', or numbers - loads that get scatter plots")
     ap.add_argument("--no-scatter-files", action="store_true", help="skip the one-plot-per-file scatter plots")
@@ -734,7 +773,8 @@ def main():
             if not a.no_contours and key in contour_sets and (contour_loads is None or item["load"] in contour_loads):
                 os.makedirs(cdir, exist_ok=True)
                 contour_figures(item, dict(pred=pred, m=m), info, key, a.units,
-                                os.path.join(cdir, "%s__%g" % (short(item["name"]), item["load"])), formats, a.dpi)
+                                os.path.join(cdir, "%s__%g" % (short(item["name"]), item["load"])), formats, a.dpi,
+                                style=dict(bands=a.bands, smooth=a.smooth, lines=a.lines))
             done += 1
             if done % 25 == 0 or done == n_total:
                 print("  %4d/%d files   %.0f s" % (done, n_total, time.time() - t0))
